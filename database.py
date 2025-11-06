@@ -7,13 +7,10 @@ def create_database():
         user="root",        
         password="mkkapri"  
     )
-
     cursor = connection.cursor()
 
     cursor.execute("CREATE DATABASE IF NOT EXISTS oreo;")
     cursor.execute("USE oreo;")
-
-
     # USERS Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -25,7 +22,6 @@ def create_database():
         address TEXT
     );
     """)
-
     # CATEGORY Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS category (
@@ -34,7 +30,6 @@ def create_database():
         description TEXT
     );
     """)
-
     # PRODUCTS Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS product (
@@ -49,7 +44,6 @@ def create_database():
         FOREIGN KEY (category_id) REFERENCES category(category_id) ON DELETE SET NULL
     );
     """)
-
     # CART Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS cart (
@@ -61,7 +55,6 @@ def create_database():
         FOREIGN KEY (product_id) REFERENCES product(product_id) ON DELETE CASCADE
     );
     """)
-
     # ORDERS Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS orders (
@@ -96,11 +89,8 @@ def create_database():
     FOREIGN KEY (product_id) REFERENCES product(product_id) ON DELETE CASCADE
 );
     """)
-
-
     connection.commit()
     cursor.close()
     connection.close()
-
     print("Database and tables created successfully!")
 create_database()
