@@ -125,7 +125,7 @@ class Dashboard(tk.Tk):
                 photo = ImageTk.PhotoImage(img)
 
             lbl_img = tk.Label(frame, image=photo, bg="white")
-            lbl_img.image = photo  # keep a reference!
+            lbl_img.image = photo  
             lbl_img.pack()
 
             tk.Label(frame, text=product[1], bg="white",
@@ -172,6 +172,5 @@ def start_dashboard(user_id, username):
     app = Dashboard(user_id, username)
     app.mainloop()
 
-# ---------- For Testing Only ----------
 if __name__ == "__main__":
     login_window(on_success=start_dashboard)
