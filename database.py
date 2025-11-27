@@ -24,7 +24,7 @@ def create_database():
     cursor.execute("CREATE DATABASE IF NOT EXISTS oreo;")
     cursor.execute("USE oreo;")
 
-    # USERS Table
+    # USERS Table (used for staff + members)
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -37,6 +37,36 @@ def create_database():
         );
         """
     )
+
+    # Add membership / role columns to users if missing
+    def _ensure_user_membership_columns():
+        def _ensure(col, ddl):
+            cursor.execute("SHOW COLUMNS FROM users LIKE %s", (col,))
+            exists = cursor.fetchone() is not None
+            if not exists:
+                cursor.execute(ddl)
+
+        # staff vs member
+        _ensure(
+            "role",
+            "ALTER TABLE users "
+            "ADD COLUMN role ENUM('admin', 'employee', 'member') DEFAULT 'member'"
+        )
+        # public membership number (customer shows this at checkout)
+        _ensure(
+            "member_number",
+            "ALTER TABLE users "
+            "ADD COLUMN member_number VARCHAR(50) UNIQUE NULL"
+        )
+        # loyalty tier
+        _ensure(
+            "membership_level",
+            "ALTER TABLE users "
+            "ADD COLUMN membership_level ENUM('Bronze','Silver','Gold') "
+            "DEFAULT 'Bronze'"
+        )
+
+    _ensure_user_membership_columns()
 
     # CATEGORY Table
     cursor.execute(
@@ -66,7 +96,7 @@ def create_database():
         """
     )
 
-    # CART Table
+    # CART Table (linked to staff user_id who is operating the POS)
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS cart (
@@ -80,7 +110,7 @@ def create_database():
         """
     )
 
-    # ORDERS Table
+    # ORDERS Table – now has member_id + discount + net_amount
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS orders (
@@ -89,10 +119,46 @@ def create_database():
             total_amount DECIMAL(10,2) NOT NULL,
             order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             status ENUM('Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled') DEFAULT 'Pending',
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL
         );
         """
     )
+
+    def _ensure_orders_extra_columns():
+        def _ensure(col, ddl):
+            cursor.execute("SHOW COLUMNS FROM orders LIKE %s", (col,))
+            exists = cursor.fetchone() is not None
+            if not exists:
+                cursor.execute(ddl)
+
+        _ensure(
+            "member_id",
+            "ALTER TABLE orders "
+            "ADD COLUMN member_id INT NULL AFTER user_id"
+        )
+        _ensure(
+            "discount_amount",
+            "ALTER TABLE orders "
+            "ADD COLUMN discount_amount DECIMAL(10,2) DEFAULT 0 AFTER total_amount"
+        )
+        _ensure(
+            "net_amount",
+            "ALTER TABLE orders "
+            "ADD COLUMN net_amount DECIMAL(10,2) DEFAULT 0 AFTER discount_amount"
+        )
+
+        # Add FK for member_id (ignore if already exists)
+        try:
+            cursor.execute(
+                "ALTER TABLE orders "
+                "ADD CONSTRAINT fk_orders_member "
+                "FOREIGN KEY (member_id) REFERENCES users(user_id) "
+                "ON DELETE SET NULL"
+            )
+        except mysql.connector.Error:
+            pass
+
+    _ensure_orders_extra_columns()
 
     # PAYMENT Table
     cursor.execute(
@@ -124,7 +190,7 @@ def create_database():
         """
     )
 
-    # Add analytics columns to users (robust across MySQL versions)
+    # Add analytics columns to users (login counts / total spent)
     def _ensure_user_analytics_columns():
         def _ensure(col, ddl):
             cursor.execute("SHOW COLUMNS FROM users LIKE %s", (col,))
@@ -155,13 +221,25 @@ def create_database():
         """
     )
 
+    # Ensure there is at least one admin account for staff login
+    cursor.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
+    admin_count = cursor.fetchone()[0]
+    if admin_count == 0:
+        cursor.execute(
+            """
+            INSERT INTO users (username, email, password, phone, address, role, member_number, membership_level)
+            VALUES ('admin', 'admin@local', 'admin', '', '', 'admin', NULL, 'Gold')
+            """
+        )
+
     connection.commit()
     cursor.close()
     connection.close()
     print("Database and tables created/updated successfully!")
 
 
-# ---------- Helper functions for analytics ----------
+# ---------- Helper functions for analytics & loyalty ----------
+
 def increment_login_counter(user_id):
     db = connect_db()
     cur = db.cursor()
@@ -176,6 +254,7 @@ def increment_login_counter(user_id):
 
 
 def add_user_spend(user_id, amount):
+    """Legacy helper."""
     db = connect_db()
     cur = db.cursor()
     try:
@@ -188,22 +267,60 @@ def add_user_spend(user_id, amount):
         db.close()
 
 
-def record_order_effects(order_id):
-    """Adds order.total_amount to the user's total_spent.
-    Can be called after creating an order.
+def _calculate_membership_level(total_spent: float) -> str:
     """
+    Basic loyalty tier:
+      - Bronze: default, < 500
+      - Silver: >= 500
+      - Gold:   >= 1000
+    """
+    if total_spent >= 1000:
+        return "Gold"
+    elif total_spent >= 500:
+        return "Silver"
+    else:
+        return "Bronze"
+
+
+def record_order_effects(order_id):
+    """Update member's loyalty (total_spent + membership_level) after an order."""
     db = connect_db()
     cur = db.cursor()
     try:
-        cur.execute("SELECT user_id, total_amount FROM orders WHERE order_id=%s", (order_id,))
+        # Use net_amount if present; otherwise fallback to total_amount
+        cur.execute(
+            "SELECT member_id, COALESCE(net_amount, total_amount) "
+            "FROM orders WHERE order_id=%s",
+            (order_id,),
+        )
         row = cur.fetchone()
-        if row:
-            user_id, total_amount = row
-            cur.execute(
-                "UPDATE users SET total_spent = COALESCE(total_spent,0) + %s WHERE user_id=%s",
-                (total_amount, user_id),
-            )
-            db.commit()
+        if not row:
+            return
+        member_id, amount = row
+        if not member_id:
+            # walk-in customer with no membership
+            return
+
+        # Update total_spent
+        cur.execute(
+            "UPDATE users SET total_spent = COALESCE(total_spent,0) + %s WHERE user_id=%s",
+            (amount, member_id),
+        )
+
+        # Re-fetch total_spent and update membership_level
+        cur.execute(
+            "SELECT COALESCE(total_spent,0) FROM users WHERE user_id=%s",
+            (member_id,),
+        )
+        total_spent = float(cur.fetchone()[0] or 0)
+        new_level = _calculate_membership_level(total_spent)
+
+        cur.execute(
+            "UPDATE users SET membership_level=%s WHERE user_id=%s",
+            (new_level, member_id),
+        )
+
+        db.commit()
     finally:
         db.close()
 
@@ -243,19 +360,25 @@ def get_product_rating(product_id):
 
 
 def get_user_stats(user_id):
-    """Returns dict with total_spent, login_count, last_login."""
+    """Returns dict with total_spent, login_count, last_login, membership_level."""
     db = connect_db()
     cur = db.cursor()
     try:
         cur.execute(
-            "SELECT COALESCE(total_spent,0), COALESCE(login_count,0), last_login FROM users WHERE user_id=%s",
+            "SELECT COALESCE(total_spent,0), COALESCE(login_count,0), last_login, membership_level "
+            "FROM users WHERE user_id=%s",
             (user_id,),
         )
         row = cur.fetchone()
         if not row:
-            return {"total_spent": 0.0, "login_count": 0, "last_login": None}
-        total_spent, login_count, last_login = row
-        return {"total_spent": float(total_spent or 0), "login_count": int(login_count or 0), "last_login": last_login}
+            return {"total_spent": 0.0, "login_count": 0, "last_login": None, "membership_level": "Bronze"}
+        total_spent, login_count, last_login, membership_level = row
+        return {
+            "total_spent": float(total_spent or 0),
+            "login_count": int(login_count or 0),
+            "last_login": last_login,
+            "membership_level": membership_level or "Bronze"
+        }
     finally:
         db.close()
 
@@ -300,4 +423,7 @@ def get_least_sold_products(limit=10):
         return cur.fetchall()
     finally:
         db.close()
+
+
+# Auto-bootstrap DB
 create_database()
