@@ -2,91 +2,123 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog
 from PIL import Image, ImageTk
 import mysql.connector
-from database import increment_login_counter
 
+from database import increment_login_counter, connect_db
 from admin import AdminPanel
 
+
+# POS Staff Login Window
 def login_window(on_success):
-    # ---------- Database Connection ----------
-    def connect_db():
-        return mysql.connector.connect(
-            host="localhost",
-            user="root",
-            password="mkkapri",
-            database="oreo"
-        )
-    # ---------- Main Window ----------
+    # Color palette (black & red)
+    BG_MAIN = "#050505"
+    BG_CARD = "#151515"
+    FG_TEXT = "#FFFFFF"
+    ACCENT = "#FF3B3B"
+
     root = tk.Tk()
-    root.title("Oreo Login")
+    root.title("Oreo POS - Staff Login")
     root.state("zoomed")
-    root.config(bg="white")
+    root.config(bg=BG_MAIN)
+
     # ---------- Load Logo ----------
     try:
         logo_img = Image.open("OREO.png")
         logo_img = logo_img.resize((120, 120))
         logo = ImageTk.PhotoImage(logo_img)
-    except:
+    except Exception:
         logo = None
-    # ---------- Switch Frames ----------
-    def open_register():
-        login_frame.pack_forget()
-        register_frame.pack(pady=20)
-    def open_login():
-        register_frame.pack_forget()
-        login_frame.pack(pady=20)
+
+    # Center card
+    card = tk.Frame(root, bg=BG_CARD, padx=40, pady=40)
+    card.place(relx=0.5, rely=0.5, anchor="center")
+
+    if logo:
+        tk.Label(card, image=logo, bg=BG_CARD).pack(pady=(0, 10))
+
+    tk.Label(
+        card,
+        text="Oreo POS",
+        font=("Arial", 22, "bold"),
+        bg=BG_CARD,
+        fg=ACCENT,
+    ).pack(pady=(0, 20))
+
+    tk.Label(card, text="Staff Username:", font=("Arial", 10, "bold"), bg=BG_CARD, fg=FG_TEXT).pack(anchor="w")
+    username_entry = tk.Entry(card, width=30, bd=0, bg="#222222", fg=FG_TEXT, insertbackground=FG_TEXT)
+    username_entry.pack(pady=5)
+
+    tk.Label(card, text="Password:", font=("Arial", 10, "bold"), bg=BG_CARD, fg=FG_TEXT).pack(anchor="w")
+    password_entry = tk.Entry(card, show="*", width=30, bd=0, bg="#222222", fg=FG_TEXT, insertbackground=FG_TEXT)
+    password_entry.pack(pady=5)
+
     # ---------- Login Function ----------
     def login_user():
-        username = username_entry.get()
-        password = password_entry.get()
+        username = username_entry.get().strip()
+        password = password_entry.get().strip()
+
         if not username or not password:
             messagebox.showwarning("Input Error", "Please fill all fields!")
-            return
-        
-        if username == "admin" and password == "admin":
-            root.destroy()
-            admin_panel = AdminPanel()
-            admin_panel.mainloop()
             return
 
         db = connect_db()
         cursor = db.cursor()
-        cursor.execute("SELECT user_id, username FROM users WHERE username=%s AND password=%s",
-                       (username, password))
-        user = cursor.fetchone()
-        db.close()
-        if user:
-            user_id, username = user
+        try:
+            # Staff only: admin or employee
+            cursor.execute(
+                """
+                SELECT user_id, username, role
+                FROM users
+                WHERE username=%s AND password=%s AND role IN ('admin','employee')
+                """,
+                (username, password),
+            )
+            user = cursor.fetchone()
+            if not user:
+                messagebox.showerror("Error", "Invalid credentials or not a staff account.")
+                return
+
+            user_id, uname, role = user
             try:
                 increment_login_counter(user_id)
             except Exception:
                 pass
+
             root.destroy()
-            on_success(user_id, username)
-        else:
-            messagebox.showerror("Error", "Invalid username or password")
-    # ---------- Forgot Password Function ----------
+            if role == "admin":
+                # Open admin panel directly
+                admin_panel = AdminPanel()
+                admin_panel.mainloop()
+            else:
+                # Employee dashboard (POS screen)
+                on_success(user_id, uname)
+        except mysql.connector.Error as err:
+            messagebox.showerror("DB Error", str(err))
+        finally:
+            db.close()
+
+    # ---------- Forgot Password (staff only) ----------
     def forgot_password():
-        email = simpledialog.askstring("Forgot Password", "Enter your Gmail address:")
+        email = simpledialog.askstring("Forgot Password", "Enter your staff email:", parent=root)
         if email is None:
             return
         email = email.strip()
         if not email:
             messagebox.showwarning("Input Error", "Email cannot be empty.")
             return
-        if not email.lower().endswith("@gmail.com"):
-            messagebox.showwarning("Input Error", "Please enter a valid Gmail address.")
-            return
 
         try:
             db = connect_db()
             cursor = db.cursor()
-            cursor.execute("SELECT password FROM users WHERE email=%s", (email,))
+            cursor.execute(
+                "SELECT password FROM users WHERE email=%s AND role IN ('admin','employee')",
+                (email,),
+            )
             row = cursor.fetchone()
             if row:
                 saved_password = row[0]
                 messagebox.showinfo("Your Password", f"Password for {email}:\n{saved_password}")
             else:
-                messagebox.showerror("Not Found", "No user found with that Gmail address.")
+                messagebox.showerror("Not Found", "No staff account found with that email.")
         except mysql.connector.Error as err:
             messagebox.showerror("Error", f"Database Error: {err}")
         finally:
@@ -94,80 +126,32 @@ def login_window(on_success):
                 db.close()
             except Exception:
                 pass
-    # ---------- Register Function ----------
-    def register_user():
-        fullname = full_name_entry.get()
-        address = address_entry.get()
-        phone = phone_entry.get()
-        password = reg_password_entry.get()
-        email = email_entry.get()
-        if not fullname or not address or not phone or not password:
-            messagebox.showwarning("Input Error", "Please fill all fields!")
-            return
-        db = connect_db()
-        cursor = db.cursor()
-        try:
-            cursor.execute(
-                "INSERT INTO users (username, email, password, phone, address) VALUES (%s, %s, %s, %s, %s)",
-                (fullname, email, password, phone, address)
-            )
-            db.commit()
-            messagebox.showinfo("Success", "Registration Successful! You can now log in.")
-            open_login()
-        except mysql.connector.Error as err:
-            messagebox.showerror("Error", f"Database Error: {err}")
-        finally:
-            db.close()
-    # ---------- Login Frame ----------
-    login_frame = tk.Frame(root, bg="white")
-    if logo:
-        tk.Label(login_frame, image=logo, bg="white").pack(pady=10)
 
-    tk.Label(login_frame, text="Oreo Login", font=("Arial", 20, "bold"), bg="white").pack(pady=10)
-    tk.Label(login_frame, text="Username:", font=("Arial", 10, "bold"), bg="white").pack()
-    username_entry = tk.Entry(login_frame, width=30, bd=2, relief="flat", bg="#ddd")
-    username_entry.pack(pady=5)
+    # Buttons
+    btn_frame = tk.Frame(card, bg=BG_CARD)
+    btn_frame.pack(pady=15, fill="x")
 
-    tk.Label(login_frame, text="Password:", font=("Arial", 10, "bold"), bg="white").pack()
-    password_entry = tk.Entry(login_frame, show="*", width=30, bd=2, relief="flat", bg="#ddd")
-    password_entry.pack(pady=5)
+    tk.Button(
+        btn_frame,
+        text="Login",
+        bg=ACCENT,
+        fg="white",
+        font=("Arial", 10, "bold"),
+        relief="flat",
+        command=login_user,
+    ).pack(fill="x", pady=(0, 5))
 
-    tk.Button(login_frame, text="Login", bg="#7B0000", fg="white", font=("Arial", 10, "bold"),
-              width=20, relief="flat", command=login_user).pack(pady=10)
-    tk.Button(login_frame, text="Register", bg="white", fg="#7B0000", font=("Arial", 10, "bold"),
-              relief="flat", command=open_register).pack(pady=5)
-    tk.Button(login_frame, text="Forgot Password?", bg="white", fg="#7B0000", font=("Arial", 10, "bold"),
-              relief="flat", command=forgot_password).pack(pady=5)
-    login_frame.pack(pady=20)
-    # ---------- Register Frame ----------
-    register_frame = tk.Frame(root, bg="white")
-    if logo:
-        tk.Label(register_frame, image=logo, bg="white").pack(pady=10)
+    tk.Button(
+        btn_frame,
+        text="Forgot Password?",
+        bg=BG_CARD,
+        fg=ACCENT,
+        font=("Arial", 10, "bold"),
+        relief="flat",
+        command=forgot_password,
+    ).pack(fill="x")
 
-    tk.Label(register_frame, text="Oreo Registration", font=("Arial", 20, "bold"), bg="white").pack(pady=10)
+    # Enter key triggers login
+    root.bind("<Return>", lambda e: login_user())
 
-    tk.Label(register_frame, text="Full Name:", font=("Arial", 10, "bold"), bg="white").pack()
-    full_name_entry = tk.Entry(register_frame, width=30, bd=2, relief="flat", bg="#ddd")
-    full_name_entry.pack(pady=5)
-
-    tk.Label(register_frame, text="Email:", font=("Arial", 10, "bold"), bg="white").pack()
-    email_entry = tk.Entry(register_frame, width=30, bd=2, relief="flat", bg="#ddd")
-    email_entry.pack(pady=5)
-
-    tk.Label(register_frame, text="Password:", font=("Arial", 10, "bold"), bg="white").pack()
-    reg_password_entry = tk.Entry(register_frame, show="*", width=30, bd=2, relief="flat", bg="#ddd")
-    reg_password_entry.pack(pady=5)
-
-    tk.Label(register_frame, text="Address:", font=("Arial", 10, "bold"), bg="white").pack()
-    address_entry = tk.Entry(register_frame, width=30, bd=2, relief="flat", bg="#ddd")
-    address_entry.pack(pady=5)
-
-    tk.Label(register_frame, text="Phone No:", font=("Arial", 10, "bold"), bg="white").pack()
-    phone_entry = tk.Entry(register_frame, width=30, bd=2, relief="flat", bg="#ddd")
-    phone_entry.pack(pady=5)
-
-    tk.Button(register_frame, text="Register", bg="#7B0000", fg="white", font=("Arial", 10, "bold"),
-              width=20, relief="flat", command=register_user).pack(pady=10)
-    tk.Button(register_frame, text="Back to Login", bg="white", fg="#7B0000", font=("Arial", 10, "bold"),
-              relief="flat", command=open_login).pack()
     root.mainloop()
